@@ -1,24 +1,13 @@
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from database import Base, SessionLocal, engine, get_db
 from database_models import ProductDB
 from models import Product, ProductCreate, ProductUpdate
 
-from fastapi.middleware.cors import CORSMiddleware
-app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://fast-api-product.vercel.app",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 seed_products = [
     {
@@ -55,10 +44,14 @@ def fill_db_if_empty() -> None:
         db.close()
 
 
-def serialize_product(product_db: ProductDB) -> Product:
-    if hasattr(Product, "model_validate"):
-        return Product.model_validate(product_db)
-    return Product.from_orm(product_db)
+def serialize_product(product_db: ProductDB) -> dict:
+    return {
+        "id": product_db.id,
+        "name": product_db.name,
+        "description": product_db.description,
+        "price": product_db.price,
+        "quantity": product_db.quantity,
+    }
 
 
 def dump_schema(schema: ProductCreate | ProductUpdate) -> dict:
@@ -76,9 +69,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://fast-api-product.vercel.app",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 @app.get("/")
 def read_root():
     return "Hello saad World"
+
 
 @app.get("/products", response_model=list[Product])
 def get_all_products(db: Session = Depends(get_db)):
