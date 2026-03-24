@@ -1,0 +1,64 @@
+:root {
+  color-scheme: light;
+  --text-strong: #17342f;
+  --text-muted: #617871;
+  --brand: #20695c;
+  --brand-strong: #184b42;
+  --surface: rgba(255, 255, 255, 0.84);
+  --border-soft: rgba(24, 52, 47, 0.09);
+  --shadow-soft: 0 20px 42px rgba(18, 40, 35, 0.08);
+  --shadow-strong: 0 28px 70px rgba(16, 38, 33, 0.2);
+  font-family:
+    "Aptos",
+    "Segoe UI Variable Text",
+    "Trebuchet MS",
+    "Segoe UI",
+    sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(255, 227, 183, 0.5), transparent 30%),
+    radial-gradient(circle at bottom right, rgba(209, 236, 228, 0.54), transparent 36%),
+    linear-gradient(180deg, #f7f3ec 0%, #eef4f0 52%, #f6f8f5 100%);
+  color: var(--text-strong);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  color: var(--text-strong);
+  background: transparent;
+}
+
+h1,
+h2,
+h3 {
+  font-family:
+    "Aptos Display",
+    "Segoe UI Variable Display",
+    "Trebuchet MS",
+    sans-serif;
+  letter-spacing: -0.03em;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+code,
+pre {
+  font-family: "Consolas", "SFMono-Regular", "Courier New", monospace;
+}
+
+#root {
+  min-height: 100vh;
+}
