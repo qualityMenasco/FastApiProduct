@@ -1,6 +1,7 @@
+import re
 from contextlib import asynccontextmanager
 
-from sqlalchemy import or_
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,8 +10,18 @@ from sqlalchemy.orm import Session
 
 from database import Base, SessionLocal, engine, get_db
 from database_models import ProductDB, UserDB
-from models import LoginResponse, Product, ProductCreate, ProductUpdate, User, UserCreate, UserLogin
-from security import create_access_token, decode_access_token, hash_password, verify_password
+from google_auth import GoogleAuthError, verify_google_credential
+from models import (
+    CompleteProfileRequest,
+    GoogleAuthRequest,
+    GoogleAuthResponse,
+    LoginResponse,
+    Product,
+    ProductCreate,
+    ProductUpdate,
+    User,
+)
+from security import create_access_token, create_setup_token, decode_access_token
 
 
 seed_products = [
@@ -34,6 +45,19 @@ seed_products = [
     },
 ]
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def ensure_user_auth_schema() -> None:
+    statements = (
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub VARCHAR",
+        "ALTER TABLE users ALTER COLUMN employee_id DROP NOT NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email_unique ON users (email)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_sub_unique ON users (google_sub)",
+    )
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
 
 
 def fill_db_if_empty() -> None:
@@ -63,6 +87,7 @@ def serialize_user(user_db: UserDB) -> dict:
     return {
         "id": user_db.id,
         "username": user_db.username,
+        "email": user_db.email,
         "employee_id": user_db.employee_id,
     }
 
@@ -73,10 +98,27 @@ def dump_schema(schema: ProductCreate | ProductUpdate) -> dict:
     return schema.dict()
 
 
-def duplicate_user_detail(existing_user: UserDB, user: UserCreate) -> str:
-    if existing_user.username == user.username:
-        return "Username already exists"
-    return "Employee ID already exists"
+def build_username_base(name: str, email: str) -> str:
+    raw_value = name or email.split("@", 1)[0]
+    normalized = re.sub(r"[^a-zA-Z0-9]+", ".", raw_value.strip().lower()).strip(".")
+    return normalized[:50] or "employee"
+
+
+def build_unique_username(db: Session, name: str, email: str, current_user_id: int | None = None) -> str:
+    username_base = build_username_base(name, email)
+    candidate = username_base
+    suffix = 1
+
+    while True:
+        query = db.query(UserDB).filter(UserDB.username == candidate)
+        if current_user_id is not None:
+            query = query.filter(UserDB.id != current_user_id)
+        if query.first() is None:
+            return candidate
+
+        suffix_label = f".{suffix}"
+        candidate = f"{username_base[: max(1, 50 - len(suffix_label))]}{suffix_label}"
+        suffix += 1
 
 
 def auth_error() -> HTTPException:
@@ -88,11 +130,19 @@ def auth_error() -> HTTPException:
 
 
 def build_login_response(user_db: UserDB) -> dict:
+    if not user_db.google_sub:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google account is not linked to this user",
+        )
+
     access_token = create_access_token(
         {
-            "sub": user_db.employee_id,
+            "sub": user_db.google_sub,
             "user_id": user_db.id,
             "username": user_db.username,
+            "email": user_db.email,
+            "employee_id": user_db.employee_id,
         }
     )
     return {
@@ -111,16 +161,97 @@ def get_current_user(
         raise auth_error()
 
     payload = decode_access_token(credentials.credentials)
-    if payload is None:
+    if payload is None or payload.get("token_kind") != "access":
         raise auth_error()
 
-    employee_id = payload.get("sub")
-    if not isinstance(employee_id, str) or not employee_id:
+    google_sub = payload.get("sub")
+    if not isinstance(google_sub, str) or not google_sub:
         raise auth_error()
 
-    db_user = db.query(UserDB).filter(UserDB.employee_id == employee_id).first()
+    db_user = db.query(UserDB).filter(UserDB.google_sub == google_sub).first()
+    if db_user is None or db_user.employee_id is None:
+        raise auth_error()
+
+    return db_user
+
+
+def build_profile_setup_response(user_db: UserDB) -> dict:
+    if not user_db.google_sub:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Google account is not linked to this user",
+        )
+
+    setup_token = create_setup_token(
+        {
+            "sub": user_db.google_sub,
+            "user_id": user_db.id,
+            "email": user_db.email,
+        }
+    )
+    return {
+        "message": "Company account verified. Enter your employee ID to finish setup.",
+        "user": serialize_user(user_db),
+        "requires_employee_id": True,
+        "setup_token": setup_token,
+        "token_type": "setup",
+        "access_token": None,
+    }
+
+
+def resolve_google_auth_error(error: GoogleAuthError) -> HTTPException:
+    error_message = str(error)
+    if "configured" in error_message or "dependency" in error_message:
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    else:
+        status_code = status.HTTP_401_UNAUTHORIZED
+    return HTTPException(status_code=status_code, detail=error_message)
+
+
+def get_or_create_google_user(identity: dict, db: Session) -> UserDB:
+    google_sub = identity["google_sub"]
+    email = identity["email"]
+    name = identity["name"]
+
+    db_user = db.query(UserDB).filter(UserDB.google_sub == google_sub).first()
     if db_user is None:
-        raise auth_error()
+        db_user = db.query(UserDB).filter(UserDB.email == email).first()
+
+    if db_user is None:
+        db_user = UserDB(
+            username=build_unique_username(db, name, email),
+            email=email,
+            google_sub=google_sub,
+            employee_id=None,
+            password_hash="",
+        )
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        return db_user
+
+    has_updates = False
+    if db_user.google_sub and db_user.google_sub != google_sub:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This email is already linked to another Google account.",
+        )
+
+    if db_user.email != email:
+        db_user.email = email
+        has_updates = True
+
+    if db_user.google_sub != google_sub:
+        db_user.google_sub = google_sub
+        has_updates = True
+
+    if not db_user.username:
+        db_user.username = build_unique_username(db, name, email, current_user_id=db_user.id)
+        has_updates = True
+
+    if has_updates:
+        db.commit()
+        db.refresh(db_user)
 
     return db_user
 
@@ -128,6 +259,7 @@ def get_current_user(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    ensure_user_auth_schema()
     fill_db_if_empty()
     yield
 
@@ -138,6 +270,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
         "https://fast-api-product.vercel.app",
     ],
     allow_credentials=True,
@@ -151,54 +286,66 @@ def read_root():
     return "Hello saad World"
 
 
-@app.post("/auth/register", response_model=User, status_code=status.HTTP_201_CREATED)
-def register_user(user: UserCreate, db: Session = Depends(get_db)):
+@app.post("/auth/google", response_model=GoogleAuthResponse)
+def authenticate_with_google(auth_request: GoogleAuthRequest, db: Session = Depends(get_db)):
+    try:
+        identity = verify_google_credential(auth_request.credential)
+    except GoogleAuthError as error:
+        raise resolve_google_auth_error(error) from None
+
+    db_user = get_or_create_google_user(identity, db)
+    if db_user.employee_id is None:
+        return build_profile_setup_response(db_user)
+
+    login_response = build_login_response(db_user)
+    return {
+        **login_response,
+        "requires_employee_id": False,
+        "setup_token": None,
+    }
+
+
+@app.post("/auth/complete-profile", response_model=LoginResponse)
+def complete_google_profile(profile_request: CompleteProfileRequest, db: Session = Depends(get_db)):
+    payload = decode_access_token(profile_request.setup_token)
+    if payload is None or payload.get("token_kind") != "profile_setup":
+        raise auth_error()
+
+    google_sub = payload.get("sub")
+    if not isinstance(google_sub, str) or not google_sub:
+        raise auth_error()
+
+    db_user = db.query(UserDB).filter(UserDB.google_sub == google_sub).first()
+    if db_user is None:
+        raise auth_error()
+
+    if db_user.employee_id == profile_request.employee_id:
+        return build_login_response(db_user)
+
     existing_user = (
         db.query(UserDB)
         .filter(
-            or_(
-                UserDB.username == user.username,
-                UserDB.employee_id == user.employee_id,
-            )
+            UserDB.employee_id == profile_request.employee_id,
+            UserDB.id != db_user.id,
         )
         .first()
     )
     if existing_user is not None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=duplicate_user_detail(existing_user, user),
+            detail="Employee ID already exists",
         )
 
-    db_user = UserDB(
-        username=user.username,
-        employee_id=user.employee_id,
-        password_hash=hash_password(user.password),
-    )
-    db.add(db_user)
+    db_user.employee_id = profile_request.employee_id
     try:
         db.commit()
     except IntegrityError:
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username or employee ID already exists",
+            detail="Employee ID already exists",
         ) from None
     db.refresh(db_user)
-    return serialize_user(db_user)
-
-
-@app.post("/auth/login", response_model=LoginResponse)
-def login_user(user_credentials: UserLogin, db: Session = Depends(get_db)):
-    db_user = db.query(UserDB).filter(UserDB.employee_id == user_credentials.employee_id).first()
-    if db_user is None or not verify_password(
-        user_credentials.password,
-        db_user.password_hash,
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid employee ID or password",
-        )
-
     return build_login_response(db_user)
 
 

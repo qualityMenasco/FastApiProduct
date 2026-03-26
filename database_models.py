@@ -18,5 +18,7 @@ class UserDB(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, nullable=False, unique=True, index=True)
-    employee_id = Column(String, nullable=False, unique=True, index=True)
-    password_hash = Column(String, nullable=False)
+    email = Column(String, nullable=True, unique=True, index=True)
+    google_sub = Column(String, nullable=True, unique=True, index=True)
+    employee_id = Column(String, nullable=True, unique=True, index=True)
+    password_hash = Column(String, nullable=False, default="")

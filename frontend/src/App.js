@@ -1,9 +1,17 @@
 import axios from "axios";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || "http://localhost:8000";
+const GOOGLE_CLIENT_ID =
+  process.env.REACT_APP_GOOGLE_CLIENT_ID ||
+  "617455632614-lpu5pdcl5rbmoiq77spd7dmc1cvhgkl8.apps.googleusercontent.com";
 const AUTH_SESSION_STORAGE_KEY = "invotrack-user-session";
+const COMPANY_GOOGLE_DOMAINS = [
+  "menascouae.com",
+  "menascoadmin.com",
+  "menascoksa.com",
+];
 
 const EMPTY_FORM = {
   name: "",
@@ -12,21 +20,14 @@ const EMPTY_FORM = {
   quantity: "",
 };
 
-const EMPTY_LOGIN_FORM = {
-  employee_id: "",
-  password: "",
-};
-
-const EMPTY_REGISTER_FORM = {
-  username: "",
-  employee_id: "",
-  password: "",
-  confirm_password: "",
-};
-
 const EMPTY_AUTH_SESSION = {
   user: null,
   token: "",
+};
+
+const EMPTY_PENDING_SETUP = {
+  setupToken: "",
+  user: null,
 };
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -90,7 +91,8 @@ function getFeedbackTone(feedback) {
     normalizedFeedback.includes("greater") ||
     normalizedFeedback.includes("error") ||
     normalizedFeedback.includes("already exists") ||
-    normalizedFeedback.includes("match")
+    normalizedFeedback.includes("match") ||
+    normalizedFeedback.includes("missing")
   ) {
     return "danger";
   }
@@ -99,7 +101,8 @@ function getFeedbackTone(feedback) {
     normalizedFeedback.includes("loading") ||
     normalizedFeedback.includes("refresh") ||
     normalizedFeedback.includes("sign in") ||
-    normalizedFeedback.includes("create an account")
+    normalizedFeedback.includes("google") ||
+    normalizedFeedback.includes("complete")
   ) {
     return "info";
   }
@@ -126,6 +129,7 @@ function readStoredSession() {
     if (
       typeof parsedUser?.id === "number" &&
       typeof parsedUser?.username === "string" &&
+      typeof parsedUser?.email === "string" &&
       typeof parsedUser?.employee_id === "string" &&
       typeof parsedToken === "string" &&
       parsedToken.length > 0
@@ -198,94 +202,109 @@ async function fetchProductsFromApi({
 }
 
 function AuthScreen({
-  authMode,
+  employeeId,
   feedback,
   isAuthenticating,
-  loginForm,
-  onLoginChange,
-  onLoginSubmit,
-  onModeChange,
-  onRegisterChange,
-  onRegisterSubmit,
-  registerForm,
+  googleClientId,
+  isCompletingProfile,
+  isGoogleReady,
+  onEmployeeIdChange,
+  onEmployeeIdSubmit,
+  onGoogleCredential,
+  onResetPendingSetup,
+  pendingSetupUser,
 }) {
+  const googleButtonRef = useRef(null);
   const feedbackTone = getFeedbackTone(feedback);
-  const isRegisterMode = authMode === "register";
+  const isEmployeeIdStep = pendingSetupUser !== null;
+
+  useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      isEmployeeIdStep ||
+      !googleClientId ||
+      !isGoogleReady ||
+      googleButtonRef.current === null ||
+      window.google?.accounts?.id === undefined
+    ) {
+      return;
+    }
+
+    googleButtonRef.current.innerHTML = "";
+    window.google.accounts.id.initialize({
+      client_id: googleClientId,
+      callback: (response) => {
+        const credential = response?.credential;
+        if (typeof credential === "string" && credential) {
+          void onGoogleCredential(credential);
+        }
+      },
+      auto_select: false,
+      cancel_on_tap_outside: false,
+      ux_mode: "popup",
+    });
+    window.google.accounts.id.renderButton(googleButtonRef.current, {
+      theme: "outline",
+      size: "large",
+      shape: "pill",
+      text: "continue_with",
+      width: 360,
+    });
+  }, [googleClientId, isEmployeeIdStep, isGoogleReady, onGoogleCredential]);
 
   return (
     <div className="auth-shell">
       <section className="auth-grid">
         <article className="auth-spotlight">
           <span className="eyebrow">Secure Access</span>
-          <h1>{isRegisterMode ? "Create your employee account." : "Welcome back to InvoTrack."}</h1>
+          <h1>{isEmployeeIdStep ? "One last step." : "Company Google sign-in only."}</h1>
           <p>
-            {isRegisterMode
-              ? "Register a new employee profile from the frontend, save it through your FastAPI register API, and start managing inventory right away."
-              : "Sign in with the employee account you created from the FastAPI register endpoint to manage products, pricing, and stock updates."}
+            {isEmployeeIdStep
+              ? "Your Google account is verified. Add your employee ID once and the backend will finish creating your employee profile."
+              : "Sign in with your approved company Google account and the backend will issue a JWT for the inventory workspace."}
           </p>
 
           <div className="auth-feature-list">
             <div className="auth-feature-card">
-              <strong>Register from the UI</strong>
-              <span>New users can create an account here with username, employee ID, and password.</span>
+              <strong>Approved company domains</strong>
+              <span>{COMPANY_GOOGLE_DOMAINS.join(" | ")}</span>
             </div>
 
             <div className="auth-feature-card">
-              <strong>Employee ID login</strong>
-              <span>Your backend signs in with employee id and password through the auth API.</span>
+              <strong>Employee ID required</strong>
+              <span>First-time users add their employee ID after Google verification.</span>
             </div>
 
             <div className="auth-feature-card">
-              <strong>Session memory</strong>
-              <span>Your browser keeps the signed-in user after a refresh.</span>
+              <strong>Backend JWT session</strong>
+              <span>Your FastAPI backend still controls the session token for every API request.</span>
             </div>
           </div>
         </article>
 
         <section className="panel auth-card">
-          <div className="auth-toggle" role="tablist" aria-label="Authentication mode">
-            <button
-              className={authMode === "login" ? "auth-toggle-btn auth-toggle-btn-active" : "auth-toggle-btn"}
-              type="button"
-              onClick={() => onModeChange("login")}
-            >
-              Login
-            </button>
-
-            <button
-              className={isRegisterMode ? "auth-toggle-btn auth-toggle-btn-active" : "auth-toggle-btn"}
-              type="button"
-              onClick={() => onModeChange("register")}
-            >
-              Register
-            </button>
-          </div>
-
           <div className="panel-header">
-            <span className="panel-kicker">{isRegisterMode ? "Register" : "Login"}</span>
-            <h2>{isRegisterMode ? "Create a new employee account" : "Sign in to continue"}</h2>
+            <span className="panel-kicker">{isEmployeeIdStep ? "Complete Profile" : "Google Sign-In"}</span>
+            <h2>{isEmployeeIdStep ? "Save your employee ID" : "Continue with your company account"}</h2>
             <p>
-              {isRegisterMode
-                ? "This form calls your FastAPI register endpoint and creates a new user record."
-                : "Use the same employee id and password you registered in the backend."}
+              {isEmployeeIdStep
+                ? "We already captured your company email and Google identity. Add your employee ID to finish onboarding."
+                : "Use Google sign-in to verify your company account. The backend will create or reuse your local user and return its own JWT."}
             </p>
           </div>
 
           <div className={`status-banner status-banner-${feedbackTone}`}>{feedback}</div>
 
-          {isRegisterMode ? (
-            <form className="product-form" onSubmit={onRegisterSubmit}>
+          {isEmployeeIdStep ? (
+            <form className="product-form" onSubmit={onEmployeeIdSubmit}>
               <label className="field">
                 <span>Username</span>
-                <input
-                  name="username"
-                  type="text"
-                  placeholder="Saad"
-                  autoComplete="username"
-                  value={registerForm.username}
-                  onChange={onRegisterChange}
-                  disabled={isAuthenticating}
-                />
+                <input type="text" value={pendingSetupUser.username} disabled />
+              </label>
+
+              <label className="field">
+                <span>Company email</span>
+                <input type="email" value={pendingSetupUser.email} disabled />
               </label>
 
               <label className="field">
@@ -294,81 +313,64 @@ function AuthScreen({
                   name="employee_id"
                   type="text"
                   placeholder="EMP001"
-                  autoComplete="username"
-                  value={registerForm.employee_id}
-                  onChange={onRegisterChange}
-                  disabled={isAuthenticating}
+                  autoComplete="off"
+                  value={employeeId}
+                  onChange={onEmployeeIdChange}
+                  disabled={isCompletingProfile}
                 />
               </label>
 
-              <label className="field">
-                <span>Password</span>
-                <input
-                  name="password"
-                  type="password"
-                  placeholder="Create a password"
-                  autoComplete="new-password"
-                  value={registerForm.password}
-                  onChange={onRegisterChange}
-                  disabled={isAuthenticating}
-                />
-              </label>
+              <div className="button-row">
+                <button className="btn btn-primary auth-submit" type="submit" disabled={isCompletingProfile}>
+                  {isCompletingProfile ? "Saving employee ID..." : "Save employee ID"}
+                </button>
 
-              <label className="field">
-                <span>Confirm password</span>
-                <input
-                  name="confirm_password"
-                  type="password"
-                  placeholder="Repeat the password"
-                  autoComplete="new-password"
-                  value={registerForm.confirm_password}
-                  onChange={onRegisterChange}
-                  disabled={isAuthenticating}
-                />
-              </label>
-
-              <button className="btn btn-primary auth-submit" type="submit" disabled={isAuthenticating}>
-                {isAuthenticating ? "Creating account..." : "Register and continue"}
-              </button>
+                <button
+                  className="btn btn-ghost auth-submit"
+                  type="button"
+                  onClick={onResetPendingSetup}
+                  disabled={isCompletingProfile}
+                >
+                  Start over
+                </button>
+              </div>
             </form>
           ) : (
-            <form className="product-form" onSubmit={onLoginSubmit}>
-              <label className="field">
-                <span>Employee ID</span>
-                <input
-                  name="employee_id"
-                  type="text"
-                  placeholder="EMP001"
-                  autoComplete="username"
-                  value={loginForm.employee_id}
-                  onChange={onLoginChange}
-                  disabled={isAuthenticating}
-                />
-              </label>
+            <div className="product-form">
+              <div className="google-button-shell">
+                {!googleClientId ? (
+                  <div className="support-card">
+                    <strong>Google client ID missing</strong>
+                    <p>Add `REACT_APP_GOOGLE_CLIENT_ID` to the frontend and `GOOGLE_CLIENT_ID` to the backend.</p>
+                  </div>
+                ) : !isGoogleReady ? (
+                  <div className="support-card">
+                    <strong>Loading Google sign-in</strong>
+                    <p>The browser is waiting for Google Identity Services to finish loading.</p>
+                  </div>
+                ) : (
+                  <div ref={googleButtonRef} />
+                )}
+              </div>
 
-              <label className="field">
-                <span>Password</span>
-                <input
-                  name="password"
-                  type="password"
-                  placeholder="Enter your password"
-                  autoComplete="current-password"
-                  value={loginForm.password}
-                  onChange={onLoginChange}
-                  disabled={isAuthenticating}
-                />
-              </label>
+              <div className="support-card">
+                <strong>Sign-in requirements</strong>
+                <p>Use one of your approved company Google accounts. Personal Google accounts are rejected by the backend.</p>
+              </div>
 
-              <button className="btn btn-primary auth-submit" type="submit" disabled={isAuthenticating}>
-                {isAuthenticating ? "Signing in..." : "Sign in"}
-              </button>
-            </form>
+              {isAuthenticating ? (
+                <div className="support-card">
+                  <strong>Verifying account</strong>
+                  <p>Your Google identity is being checked and linked to your local employee profile.</p>
+                </div>
+              ) : null}
+            </div>
           )}
 
           <p className="auth-footnote">
-            {isRegisterMode
-              ? "Register uses username, employee ID, and password. After success, the new account is signed in automatically."
-              : "Example password format: S@12345. It only needs to match the password used during registration."}
+            {isEmployeeIdStep
+              ? "Your employee ID is only requested when the backend sees this is your first Google sign-in."
+              : "After Google verifies your company account, the backend signs you into this app with its own JWT."}
           </p>
         </section>
       </section>
@@ -378,6 +380,8 @@ function AuthScreen({
 
 function App() {
   const [authSession, setAuthSession] = useState(() => readStoredSession());
+  const [pendingSetup, setPendingSetup] = useState(EMPTY_PENDING_SETUP);
+  const [employeeId, setEmployeeId] = useState("");
   const [products, setProducts] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState(null);
@@ -388,13 +392,14 @@ function App() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isLookupLoading, setIsLookupLoading] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState(null);
-  const [feedback, setFeedback] = useState("Loading inventory from your backend...");
-  const [authMode, setAuthMode] = useState("login");
-  const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
-  const [registerForm, setRegisterForm] = useState(EMPTY_REGISTER_FORM);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [isCompletingProfile, setIsCompletingProfile] = useState(false);
+  const [isGoogleReady, setIsGoogleReady] = useState(
+    () => typeof window !== "undefined" && Boolean(window.google?.accounts?.id)
+  );
+  const [feedback, setFeedback] = useState("Loading inventory from your backend...");
   const [authFeedback, setAuthFeedback] = useState(
-    "Sign in with your employee ID or create an account to access the inventory dashboard."
+    "Sign in with your approved company Google account to access the inventory dashboard."
   );
   const currentUser = authSession.user;
   const authToken = authSession.token;
@@ -402,6 +407,21 @@ function App() {
   useEffect(() => {
     persistAuthSession(authSession);
   }, [authSession]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || isGoogleReady) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      if (window.google?.accounts?.id) {
+        setIsGoogleReady(true);
+        window.clearInterval(intervalId);
+      }
+    }, 250);
+
+    return () => window.clearInterval(intervalId);
+  }, [isGoogleReady]);
 
   const totalProducts = products.length;
   const totalUnits = products.reduce(
@@ -442,6 +462,12 @@ function App() {
     setEditingId(null);
   }
 
+  const resetPendingSetup = useCallback(() => {
+    setPendingSetup(EMPTY_PENDING_SETUP);
+    setEmployeeId("");
+    setAuthFeedback("Sign in with your approved company Google account to access the inventory dashboard.");
+  }, []);
+
   function clearWorkspace() {
     setSearchTerm("");
     setLookupId("");
@@ -450,17 +476,10 @@ function App() {
     setFeedback("Workspace cleared.");
   }
 
-  function handleAuthModeChange(nextMode) {
-    setAuthMode(nextMode);
-    setAuthFeedback(
-      nextMode === "register"
-        ? "Create an account with username, employee ID, and password."
-        : "Sign in with your employee ID to access the inventory dashboard."
-    );
-  }
-
   const handleAuthFailure = useCallback(() => {
     setAuthSession(EMPTY_AUTH_SESSION);
+    setPendingSetup(EMPTY_PENDING_SETUP);
+    setEmployeeId("");
     setProducts([]);
     setSelectedProduct(null);
     setSearchTerm("");
@@ -470,11 +489,8 @@ function App() {
     setIsLookupLoading(false);
     setForm(EMPTY_FORM);
     setEditingId(null);
-    setAuthMode("login");
-    setLoginForm(EMPTY_LOGIN_FORM);
-    setRegisterForm(EMPTY_REGISTER_FORM);
     setFeedback("Loading inventory from your backend...");
-    setAuthFeedback("Your session expired. Sign in again to continue.");
+    setAuthFeedback("Your session expired. Sign in again with your company Google account.");
   }, []);
 
   useEffect(() => {
@@ -550,22 +566,8 @@ function App() {
     }));
   }
 
-  function handleLoginInputChange(event) {
-    const { name, value } = event.target;
-
-    setLoginForm((currentForm) => ({
-      ...currentForm,
-      [name]: value,
-    }));
-  }
-
-  function handleRegisterInputChange(event) {
-    const { name, value } = event.target;
-
-    setRegisterForm((currentForm) => ({
-      ...currentForm,
-      [name]: value,
-    }));
+  function handleEmployeeIdChange(event) {
+    setEmployeeId(event.target.value);
   }
 
   function handleEdit(product) {
@@ -581,94 +583,87 @@ function App() {
     setFeedback(`Editing product #${product.id}. Save changes to update the backend.`);
   }
 
-  async function handleLoginSubmit(event) {
-    event.preventDefault();
-
-    const employeeId = loginForm.employee_id.trim();
-    const password = loginForm.password;
-
-    if (!employeeId || !password) {
-      setAuthFeedback("Enter both employee ID and password to sign in.");
-      return;
-    }
-
+  const handleGoogleCredential = useCallback(async (credential) => {
     try {
       setIsAuthenticating(true);
 
-      const response = await axios.post(`${API_BASE_URL}/auth/login`, {
-        employee_id: employeeId,
-        password,
+      const response = await axios.post(`${API_BASE_URL}/auth/google`, {
+        credential,
       });
 
+      if (response.data.requires_employee_id) {
+        setPendingSetup({
+          setupToken: response.data.setup_token,
+          user: response.data.user,
+        });
+        setEmployeeId("");
+        setAuthFeedback(response.data.message || "Enter your employee ID to complete setup.");
+        return;
+      }
+
+      setPendingSetup(EMPTY_PENDING_SETUP);
+      setEmployeeId("");
       setAuthSession({
         user: response.data.user,
         token: response.data.access_token,
       });
-      setLoginForm(EMPTY_LOGIN_FORM);
-      setRegisterForm(EMPTY_REGISTER_FORM);
       setAuthFeedback(response.data.message || "Login successful.");
       setFeedback("Loading inventory from your backend...");
     } catch (error) {
-      setAuthFeedback(getErrorMessage(error, "Could not sign in right now."));
+      resetPendingSetup();
+      setAuthFeedback(getErrorMessage(error, "Could not sign in with Google right now."));
     } finally {
       setIsAuthenticating(false);
     }
-  }
+  }, [resetPendingSetup]);
 
-  async function handleRegisterSubmit(event) {
+  async function handleCompleteProfileSubmit(event) {
     event.preventDefault();
 
-    const username = registerForm.username.trim();
-    const employeeId = registerForm.employee_id.trim();
-    const password = registerForm.password;
-    const confirmPassword = registerForm.confirm_password;
+    const nextEmployeeId = employeeId.trim();
 
-    if (!username || !employeeId || !password || !confirmPassword) {
-      setAuthFeedback("Complete username, employee ID, password, and confirmation to register.");
+    if (!nextEmployeeId) {
+      setAuthFeedback("Enter your employee ID to complete the first-time setup.");
       return;
     }
 
-    if (password.length < 6) {
-      setAuthFeedback("Password must be at least 6 characters long.");
-      return;
-    }
-
-    if (password !== confirmPassword) {
-      setAuthFeedback("Password and confirm password must match.");
+    if (!pendingSetup.setupToken) {
+      setAuthFeedback("Google setup expired. Please sign in again.");
+      resetPendingSetup();
       return;
     }
 
     try {
-      setIsAuthenticating(true);
+      setIsCompletingProfile(true);
 
-      const response = await axios.post(`${API_BASE_URL}/auth/register`, {
-        username,
-        employee_id: employeeId,
-        password,
+      const response = await axios.post(`${API_BASE_URL}/auth/complete-profile`, {
+        employee_id: nextEmployeeId,
+        setup_token: pendingSetup.setupToken,
       });
 
-      const loginResponse = await axios.post(`${API_BASE_URL}/auth/login`, {
-        employee_id: employeeId,
-        password,
-      });
-
+      setPendingSetup(EMPTY_PENDING_SETUP);
+      setEmployeeId("");
       setAuthSession({
-        user: loginResponse.data.user,
-        token: loginResponse.data.access_token,
+        user: response.data.user,
+        token: response.data.access_token,
       });
-      setLoginForm(EMPTY_LOGIN_FORM);
-      setRegisterForm(EMPTY_REGISTER_FORM);
-      setAuthFeedback(`Account created successfully. Welcome, ${response.data.username}.`);
+      setAuthFeedback(response.data.message || "Employee ID saved successfully.");
       setFeedback("Loading inventory from your backend...");
     } catch (error) {
-      setAuthFeedback(getErrorMessage(error, "Could not create the account right now."));
+      setAuthFeedback(getErrorMessage(error, "Could not save your employee ID right now."));
     } finally {
-      setIsAuthenticating(false);
+      setIsCompletingProfile(false);
     }
   }
 
   function handleLogout() {
+    if (typeof window !== "undefined" && window.google?.accounts?.id) {
+      window.google.accounts.id.disableAutoSelect();
+    }
+
     setAuthSession(EMPTY_AUTH_SESSION);
+    setPendingSetup(EMPTY_PENDING_SETUP);
+    setEmployeeId("");
     setProducts([]);
     setSelectedProduct(null);
     setSearchTerm("");
@@ -676,12 +671,9 @@ function App() {
     setDeleteTargetId(null);
     setIsSubmitting(false);
     setIsLookupLoading(false);
-    setAuthMode("login");
-    setLoginForm(EMPTY_LOGIN_FORM);
-    setRegisterForm(EMPTY_REGISTER_FORM);
     resetForm();
     setFeedback("Loading inventory from your backend...");
-    setAuthFeedback("You have been signed out. Sign in or register to access inventory.");
+    setAuthFeedback("You have been signed out. Sign in again with your company Google account.");
   }
 
   async function handleSubmit(event) {
@@ -812,16 +804,17 @@ function App() {
   if (currentUser === null) {
     return (
       <AuthScreen
-        authMode={authMode}
+        employeeId={employeeId}
         feedback={authFeedback}
+        googleClientId={GOOGLE_CLIENT_ID}
         isAuthenticating={isAuthenticating}
-        loginForm={loginForm}
-        onLoginChange={handleLoginInputChange}
-        onLoginSubmit={handleLoginSubmit}
-        onModeChange={handleAuthModeChange}
-        onRegisterChange={handleRegisterInputChange}
-        onRegisterSubmit={handleRegisterSubmit}
-        registerForm={registerForm}
+        isCompletingProfile={isCompletingProfile}
+        isGoogleReady={isGoogleReady}
+        onEmployeeIdChange={handleEmployeeIdChange}
+        onEmployeeIdSubmit={handleCompleteProfileSubmit}
+        onGoogleCredential={handleGoogleCredential}
+        onResetPendingSetup={resetPendingSetup}
+        pendingSetupUser={pendingSetup.user}
       />
     );
   }
@@ -842,6 +835,7 @@ function App() {
           <div className="session-chip">
             <span>Signed in as</span>
             <strong>{currentUser.username}</strong>
+            <small>{currentUser.email}</small>
             <small>{currentUser.employee_id}</small>
           </div>
 

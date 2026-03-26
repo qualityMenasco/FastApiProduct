@@ -17,6 +17,7 @@ PBKDF2_SALT_BYTES = 16
 BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
+SETUP_TOKEN_EXPIRE_MINUTES = 10
 JWT_SECRET_KEY = os.getenv(
     "JWT_SECRET_KEY",
     "change-this-jwt-secret-in-production",
@@ -98,7 +99,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return False
 
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
+def create_signed_token(data: dict, expires_delta: timedelta | None = None) -> str:
     expire_at = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
@@ -113,6 +114,26 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     signing_input = f"{_b64encode_json(header)}.{_b64encode_json(payload)}"
     signature = _b64encode(_sign_jwt_value(signing_input))
     return f"{signing_input}.{signature}"
+
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
+    return create_signed_token(
+        {
+            **data,
+            "token_kind": "access",
+        },
+        expires_delta=expires_delta,
+    )
+
+
+def create_setup_token(data: dict, expires_delta: timedelta | None = None) -> str:
+    return create_signed_token(
+        {
+            **data,
+            "token_kind": "profile_setup",
+        },
+        expires_delta=expires_delta or timedelta(minutes=SETUP_TOKEN_EXPIRE_MINUTES),
+    )
 
 
 def decode_access_token(token: str) -> dict | None:
