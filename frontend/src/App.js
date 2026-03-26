@@ -3,12 +3,18 @@ import { useEffect, useState } from "react";
 import "./App.css";
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || "http://localhost:8000";
+const USER_SESSION_STORAGE_KEY = "invotrack-user-session";
 
 const EMPTY_FORM = {
   name: "",
   description: "",
   price: "",
   quantity: "",
+};
+
+const EMPTY_LOGIN_FORM = {
+  employee_id: "",
+  password: "",
 };
 
 const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -54,16 +60,62 @@ function getFeedbackTone(feedback) {
   if (
     normalizedFeedback.includes("could not") ||
     normalizedFeedback.includes("valid") ||
-    normalizedFeedback.includes("greater")
+    normalizedFeedback.includes("greater") ||
+    normalizedFeedback.includes("error")
   ) {
     return "danger";
   }
 
-  if (normalizedFeedback.includes("loading") || normalizedFeedback.includes("refresh")) {
+  if (
+    normalizedFeedback.includes("loading") ||
+    normalizedFeedback.includes("refresh") ||
+    normalizedFeedback.includes("sign in")
+  ) {
     return "info";
   }
 
   return "success";
+}
+
+function readStoredUser() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const storedUser = window.localStorage.getItem(USER_SESSION_STORAGE_KEY);
+
+    if (!storedUser) {
+      return null;
+    }
+
+    const parsedUser = JSON.parse(storedUser);
+
+    if (
+      typeof parsedUser?.id === "number" &&
+      typeof parsedUser?.username === "string" &&
+      typeof parsedUser?.employee_id === "string"
+    ) {
+      return parsedUser;
+    }
+  } catch (error) {
+    window.localStorage.removeItem(USER_SESSION_STORAGE_KEY);
+  }
+
+  return null;
+}
+
+function persistUserSession(user) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (user === null) {
+    window.localStorage.removeItem(USER_SESSION_STORAGE_KEY);
+    return;
+  }
+
+  window.localStorage.setItem(USER_SESSION_STORAGE_KEY, JSON.stringify(user));
 }
 
 async function fetchProductsFromApi({
@@ -76,8 +128,6 @@ async function fetchProductsFromApi({
   try {
     setIsLoading(true);
 
-    // GET /products
-    // This loads the full inventory list from FastAPI and fills the table.
     const response = await axios.get(`${API_BASE_URL}/products`);
 
     setProducts(response.data);
@@ -100,6 +150,95 @@ async function fetchProductsFromApi({
   }
 }
 
+function LoginScreen({
+  feedback,
+  form,
+  isAuthenticating,
+  onChange,
+  onSubmit,
+}) {
+  const feedbackTone = getFeedbackTone(feedback);
+
+  return (
+    <div className="auth-shell">
+      <section className="auth-grid">
+        <article className="auth-spotlight">
+          <span className="eyebrow">Secure Access</span>
+          <h1>Welcome back to InvoTrack.</h1>
+          <p>
+            Sign in with the employee account you created from the FastAPI register
+            endpoint to manage products, pricing, and stock updates.
+          </p>
+
+          <div className="auth-feature-list">
+            <div className="auth-feature-card">
+              <strong>Employee ID login</strong>
+              <span>Your backend now signs in with employee id and password.</span>
+            </div>
+
+            <div className="auth-feature-card">
+              <strong>Live inventory workspace</strong>
+              <span>The dashboard loads directly from your FastAPI product APIs.</span>
+            </div>
+
+            <div className="auth-feature-card">
+              <strong>Session memory</strong>
+              <span>Your browser keeps the signed-in user after a refresh.</span>
+            </div>
+          </div>
+        </article>
+
+        <section className="panel auth-card">
+          <div className="panel-header">
+            <span className="panel-kicker">Login</span>
+            <h2>Sign in to continue</h2>
+            <p>Use the same employee id and password you registered in the backend.</p>
+          </div>
+
+          <div className={`status-banner status-banner-${feedbackTone}`}>{feedback}</div>
+
+          <form className="product-form" onSubmit={onSubmit}>
+            <label className="field">
+              <span>Employee ID</span>
+              <input
+                name="employee_id"
+                type="text"
+                placeholder="EMP001"
+                autoComplete="username"
+                value={form.employee_id}
+                onChange={onChange}
+                disabled={isAuthenticating}
+              />
+            </label>
+
+            <label className="field">
+              <span>Password</span>
+              <input
+                name="password"
+                type="password"
+                placeholder="Enter your password"
+                autoComplete="current-password"
+                value={form.password}
+                onChange={onChange}
+                disabled={isAuthenticating}
+              />
+            </label>
+
+            <button className="btn btn-primary auth-submit" type="submit" disabled={isAuthenticating}>
+              {isAuthenticating ? "Signing in..." : "Sign in"}
+            </button>
+          </form>
+
+          <p className="auth-footnote">
+            Example password format: <strong>S@12345</strong>. It only needs to match
+            the password used during registration.
+          </p>
+        </section>
+      </section>
+    </div>
+  );
+}
+
 function App() {
   const [products, setProducts] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -112,8 +251,23 @@ function App() {
   const [isLookupLoading, setIsLookupLoading] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState(null);
   const [feedback, setFeedback] = useState("Loading inventory from your backend...");
+  const [currentUser, setCurrentUser] = useState(() => readStoredUser());
+  const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [authFeedback, setAuthFeedback] = useState(
+    "Sign in with your employee ID to access the inventory dashboard."
+  );
 
   useEffect(() => {
+    persistUserSession(currentUser);
+  }, [currentUser]);
+
+  useEffect(() => {
+    if (currentUser === null) {
+      setIsLoading(false);
+      return;
+    }
+
     void fetchProductsFromApi({
       setProducts,
       setSelectedProduct,
@@ -121,7 +275,7 @@ function App() {
       setIsLoading,
       setFeedback,
     });
-  }, []);
+  }, [currentUser]);
 
   const totalProducts = products.length;
   const totalUnits = products.reduce(
@@ -157,7 +311,24 @@ function App() {
   const feedbackTone = getFeedbackTone(feedback);
   const isEditing = editingId !== null;
 
+  function resetForm() {
+    setForm(EMPTY_FORM);
+    setEditingId(null);
+  }
+
+  function clearWorkspace() {
+    setSearchTerm("");
+    setLookupId("");
+    setSelectedProduct(null);
+    resetForm();
+    setFeedback("Workspace cleared.");
+  }
+
   async function refreshProducts() {
+    if (currentUser === null) {
+      return;
+    }
+
     await fetchProductsFromApi({
       setProducts,
       setSelectedProduct,
@@ -171,8 +342,6 @@ function App() {
     try {
       setIsLookupLoading(true);
 
-      // GET /products/{product_id}
-      // This fetches a single record so the detail panel shows the latest backend data.
       const response = await axios.get(`${API_BASE_URL}/products/${productId}`);
 
       setSelectedProduct(response.data);
@@ -193,23 +362,19 @@ function App() {
     }
   }
 
-  function resetForm() {
-    setForm(EMPTY_FORM);
-    setEditingId(null);
-  }
-
-  function clearWorkspace() {
-    setSearchTerm("");
-    setLookupId("");
-    setSelectedProduct(null);
-    resetForm();
-    setFeedback("Workspace cleared.");
-  }
-
   function handleInputChange(event) {
     const { name, value } = event.target;
 
     setForm((currentForm) => ({
+      ...currentForm,
+      [name]: value,
+    }));
+  }
+
+  function handleLoginInputChange(event) {
+    const { name, value } = event.target;
+
+    setLoginForm((currentForm) => ({
       ...currentForm,
       [name]: value,
     }));
@@ -226,6 +391,50 @@ function App() {
       quantity: String(product.quantity),
     });
     setFeedback(`Editing product #${product.id}. Save changes to update the backend.`);
+  }
+
+  async function handleLoginSubmit(event) {
+    event.preventDefault();
+
+    const employeeId = loginForm.employee_id.trim();
+    const password = loginForm.password;
+
+    if (!employeeId || !password) {
+      setAuthFeedback("Enter both employee ID and password to sign in.");
+      return;
+    }
+
+    try {
+      setIsAuthenticating(true);
+
+      const response = await axios.post(`${API_BASE_URL}/auth/login`, {
+        employee_id: employeeId,
+        password,
+      });
+
+      setCurrentUser(response.data.user);
+      setLoginForm(EMPTY_LOGIN_FORM);
+      setAuthFeedback(response.data.message || "Login successful.");
+      setFeedback("Loading inventory from your backend...");
+    } catch (error) {
+      setAuthFeedback(getErrorMessage(error, "Could not sign in right now."));
+    } finally {
+      setIsAuthenticating(false);
+    }
+  }
+
+  function handleLogout() {
+    setCurrentUser(null);
+    setProducts([]);
+    setSelectedProduct(null);
+    setSearchTerm("");
+    setLookupId("");
+    setDeleteTargetId(null);
+    setIsSubmitting(false);
+    setIsLookupLoading(false);
+    resetForm();
+    setFeedback("Loading inventory from your backend...");
+    setAuthFeedback("You have been signed out. Sign in again to access inventory.");
   }
 
   async function handleSubmit(event) {
@@ -257,12 +466,7 @@ function App() {
       setIsSubmitting(true);
 
       if (isEditing) {
-        // PUT /products/{product_id}
-        // This sends the updated form values to FastAPI for the selected product id.
-        const response = await axios.put(
-          `${API_BASE_URL}/products/${editingId}`,
-          payload
-        );
+        const response = await axios.put(`${API_BASE_URL}/products/${editingId}`, payload);
 
         setProducts((currentProducts) =>
           currentProducts.map((product) =>
@@ -273,8 +477,6 @@ function App() {
         setLookupId(String(response.data.id));
         setFeedback(`Product #${response.data.id} updated successfully.`);
       } else {
-        // POST /products
-        // This sends a new product object to FastAPI and adds the created row to the table.
         const response = await axios.post(`${API_BASE_URL}/products`, payload);
 
         setProducts((currentProducts) => [...currentProducts, response.data]);
@@ -305,8 +507,6 @@ function App() {
     try {
       setDeleteTargetId(productId);
 
-      // DELETE /products/{product_id}
-      // This removes the product in FastAPI, then removes the same row from React state.
       await axios.delete(`${API_BASE_URL}/products/${productId}`);
 
       setProducts((currentProducts) =>
@@ -346,6 +546,18 @@ function App() {
     await fetchProductById(productId);
   }
 
+  if (currentUser === null) {
+    return (
+      <LoginScreen
+        feedback={authFeedback}
+        form={loginForm}
+        isAuthenticating={isAuthenticating}
+        onChange={handleLoginInputChange}
+        onSubmit={handleLoginSubmit}
+      />
+    );
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -359,6 +571,12 @@ function App() {
         </div>
 
         <div className="topbar-actions">
+          <div className="session-chip">
+            <span>Signed in as</span>
+            <strong>{currentUser.username}</strong>
+            <small>{currentUser.employee_id}</small>
+          </div>
+
           <button
             className="btn btn-secondary"
             type="button"
@@ -370,6 +588,10 @@ function App() {
 
           <button className="btn btn-ghost" type="button" onClick={clearWorkspace}>
             Clear workspace
+          </button>
+
+          <button className="btn btn-ghost" type="button" onClick={handleLogout}>
+            Sign out
           </button>
         </div>
       </header>
