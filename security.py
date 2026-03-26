@@ -4,15 +4,15 @@ import hmac
 import os
 
 try:
-    from passlib.context import CryptContext
+    import bcrypt
 except ImportError:
-    CryptContext = None
+    bcrypt = None
 
 
 PBKDF2_ALGORITHM = "pbkdf2_sha256"
 PBKDF2_ITERATIONS = 600000
 PBKDF2_SALT_BYTES = 16
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto") if CryptContext else None
+BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
 
 
 def _b64encode(value: bytes) -> str:
@@ -52,15 +52,27 @@ def _verify_with_pbkdf2(plain_password: str, hashed_password: str) -> bool:
     return hmac.compare_digest(_b64encode(digest), expected_digest)
 
 
+def _verify_with_bcrypt(plain_password: str, hashed_password: str) -> bool:
+    if bcrypt is None:
+        return False
+
+    password_bytes = plain_password.encode("utf-8")
+    hash_bytes = hashed_password.encode("utf-8")
+
+    try:
+        return bcrypt.checkpw(password_bytes, hash_bytes)
+    except ValueError:
+        # Older bcrypt behavior silently truncated passwords after 72 bytes.
+        return bcrypt.checkpw(password_bytes[:72], hash_bytes)
+
+
 def hash_password(password: str) -> str:
-    if pwd_context is not None:
-        return pwd_context.hash(password)
     return _hash_with_pbkdf2(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     if hashed_password.startswith(f"{PBKDF2_ALGORITHM}$"):
         return _verify_with_pbkdf2(plain_password, hashed_password)
-    if pwd_context is None:
-        return False
-    return pwd_context.verify(plain_password, hashed_password)
+    if hashed_password.startswith(BCRYPT_PREFIXES):
+        return _verify_with_bcrypt(plain_password, hashed_password)
+    return False
