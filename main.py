@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
 
+from sqlalchemy import or_
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from database import Base, SessionLocal, engine, get_db
-from database_models import ProductDB
-from models import Product, ProductCreate, ProductUpdate
+from database_models import ProductDB, UserDB
+from models import LoginResponse, Product, ProductCreate, ProductUpdate, User, UserCreate, UserLogin
+from security import hash_password, verify_password
 
 
 seed_products = [
@@ -54,6 +56,14 @@ def serialize_product(product_db: ProductDB) -> dict:
     }
 
 
+def serialize_user(user_db: UserDB) -> dict:
+    return {
+        "id": user_db.id,
+        "username": user_db.username,
+        "employee_id": user_db.employee_id,
+    }
+
+
 def dump_schema(schema: ProductCreate | ProductUpdate) -> dict:
     if hasattr(schema, "model_dump"):
         return schema.model_dump()
@@ -84,6 +94,54 @@ app.add_middleware(
 @app.get("/")
 def read_root():
     return "Hello saad World"
+
+
+@app.post("/auth/register", response_model=User, status_code=status.HTTP_201_CREATED)
+def register_user(user: UserCreate, db: Session = Depends(get_db)):
+    existing_user = (
+        db.query(UserDB)
+        .filter(
+            or_(
+                UserDB.username == user.username,
+                UserDB.employee_id == user.employee_id,
+            )
+        )
+        .first()
+    )
+    if existing_user is not None:
+        if existing_user.username == user.username:
+            detail = "Username already exists"
+        else:
+            detail = "Employee ID already exists"
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+    db_user = UserDB(
+        username=user.username,
+        employee_id=user.employee_id,
+        password_hash=hash_password(user.password),
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return serialize_user(db_user)
+
+
+@app.post("/auth/login", response_model=LoginResponse)
+def login_user(user_credentials: UserLogin, db: Session = Depends(get_db)):
+    db_user = db.query(UserDB).filter(UserDB.employee_id == user_credentials.employee_id).first()
+    if db_user is None or not verify_password(
+        user_credentials.password,
+        db_user.password_hash,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid employee ID or password",
+        )
+
+    return {
+        "message": "Login successful",
+        "user": serialize_user(db_user),
+    }
 
 
 @app.get("/products", response_model=list[Product])
