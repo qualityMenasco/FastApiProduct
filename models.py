@@ -59,5 +59,7 @@ class User(UserBase):
 
 
 class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
     message: str
     user: User

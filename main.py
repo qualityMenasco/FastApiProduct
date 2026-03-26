@@ -4,12 +4,13 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from database import Base, SessionLocal, engine, get_db
 from database_models import ProductDB, UserDB
 from models import LoginResponse, Product, ProductCreate, ProductUpdate, User, UserCreate, UserLogin
-from security import hash_password, verify_password
+from security import create_access_token, decode_access_token, hash_password, verify_password
 
 
 seed_products = [
@@ -32,6 +33,7 @@ seed_products = [
         "quantity": 5,
     },
 ]
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def fill_db_if_empty() -> None:
@@ -77,6 +79,52 @@ def duplicate_user_detail(existing_user: UserDB, user: UserCreate) -> str:
     return "Employee ID already exists"
 
 
+def auth_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def build_login_response(user_db: UserDB) -> dict:
+    access_token = create_access_token(
+        {
+            "sub": user_db.employee_id,
+            "user_id": user_db.id,
+            "username": user_db.username,
+        }
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "message": "Login successful",
+        "user": serialize_user(user_db),
+    }
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> UserDB:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise auth_error()
+
+    payload = decode_access_token(credentials.credentials)
+    if payload is None:
+        raise auth_error()
+
+    employee_id = payload.get("sub")
+    if not isinstance(employee_id, str) or not employee_id:
+        raise auth_error()
+
+    db_user = db.query(UserDB).filter(UserDB.employee_id == employee_id).first()
+    if db_user is None:
+        raise auth_error()
+
+    return db_user
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -98,7 +146,7 @@ app.add_middleware(
 )
 
 
-@app.get("/")
+@app.get("/", dependencies=[Depends(get_current_user)])
 def read_root():
     return "Hello saad World"
 
@@ -151,19 +199,16 @@ def login_user(user_credentials: UserLogin, db: Session = Depends(get_db)):
             detail="Invalid employee ID or password",
         )
 
-    return {
-        "message": "Login successful",
-        "user": serialize_user(db_user),
-    }
+    return build_login_response(db_user)
 
 
-@app.get("/products", response_model=list[Product])
+@app.get("/products", response_model=list[Product], dependencies=[Depends(get_current_user)])
 def get_all_products(db: Session = Depends(get_db)):
     products = db.query(ProductDB).all()
     return [serialize_product(product) for product in products]
 
 
-@app.get("/products/{product_id}", response_model=Product)
+@app.get("/products/{product_id}", response_model=Product, dependencies=[Depends(get_current_user)])
 def get_product(product_id: int, db: Session = Depends(get_db)):
     product = db.get(ProductDB, product_id)
     if product is None:
@@ -171,7 +216,12 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
     return serialize_product(product)
 
 
-@app.post("/products", response_model=Product, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/products",
+    response_model=Product,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(get_current_user)],
+)
 def create_product(product: ProductCreate, db: Session = Depends(get_db)):
     db_product = ProductDB(**dump_schema(product))
     db.add(db_product)
@@ -180,7 +230,7 @@ def create_product(product: ProductCreate, db: Session = Depends(get_db)):
     return serialize_product(db_product)
 
 
-@app.put("/products/{product_id}", response_model=Product)
+@app.put("/products/{product_id}", response_model=Product, dependencies=[Depends(get_current_user)])
 def update_product(product_id: int, updated_product: ProductUpdate, db: Session = Depends(get_db)):
     db_product = db.get(ProductDB, product_id)
     if db_product is None:
@@ -194,7 +244,7 @@ def update_product(product_id: int, updated_product: ProductUpdate, db: Session 
     return serialize_product(db_product)
 
 
-@app.delete("/products/{product_id}")
+@app.delete("/products/{product_id}", dependencies=[Depends(get_current_user)])
 def delete_product(product_id: int, db: Session = Depends(get_db)):
     db_product = db.get(ProductDB, product_id)
     if db_product is None:

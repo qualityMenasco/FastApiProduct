@@ -1,9 +1,9 @@
 import axios from "axios";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import "./App.css";
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || "http://localhost:8000";
-const USER_SESSION_STORAGE_KEY = "invotrack-user-session";
+const AUTH_SESSION_STORAGE_KEY = "invotrack-user-session";
 
 const EMPTY_FORM = {
   name: "",
@@ -17,6 +17,18 @@ const EMPTY_LOGIN_FORM = {
   password: "",
 };
 
+const EMPTY_REGISTER_FORM = {
+  username: "",
+  employee_id: "",
+  password: "",
+  confirm_password: "",
+};
+
+const EMPTY_AUTH_SESSION = {
+  user: null,
+  token: "",
+};
+
 const currencyFormatter = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -28,6 +40,21 @@ function getErrorMessage(error, fallbackMessage) {
   }
 
   return fallbackMessage;
+}
+
+function isUnauthorizedError(error) {
+  return axios.isAxiosError(error) && error.response?.status === 401;
+}
+
+
+function buildAuthHeaders(token) {
+  if (!token) {
+    return {};
+  }
+
+  return {
+    Authorization: `Bearer ${token}`,
+  };
 }
 
 function getStockLabel(quantity) {
@@ -61,7 +88,9 @@ function getFeedbackTone(feedback) {
     normalizedFeedback.includes("could not") ||
     normalizedFeedback.includes("valid") ||
     normalizedFeedback.includes("greater") ||
-    normalizedFeedback.includes("error")
+    normalizedFeedback.includes("error") ||
+    normalizedFeedback.includes("already exists") ||
+    normalizedFeedback.includes("match")
   ) {
     return "danger";
   }
@@ -69,7 +98,8 @@ function getFeedbackTone(feedback) {
   if (
     normalizedFeedback.includes("loading") ||
     normalizedFeedback.includes("refresh") ||
-    normalizedFeedback.includes("sign in")
+    normalizedFeedback.includes("sign in") ||
+    normalizedFeedback.includes("create an account")
   ) {
     return "info";
   }
@@ -77,48 +107,58 @@ function getFeedbackTone(feedback) {
   return "success";
 }
 
-function readStoredUser() {
+function readStoredSession() {
   if (typeof window === "undefined") {
-    return null;
+    return EMPTY_AUTH_SESSION;
   }
 
   try {
-    const storedUser = window.localStorage.getItem(USER_SESSION_STORAGE_KEY);
+    const storedUser = window.localStorage.getItem(AUTH_SESSION_STORAGE_KEY);
 
     if (!storedUser) {
-      return null;
+      return EMPTY_AUTH_SESSION;
     }
 
-    const parsedUser = JSON.parse(storedUser);
+    const parsedSession = JSON.parse(storedUser);
+    const parsedUser = parsedSession?.user;
+    const parsedToken = parsedSession?.token;
 
     if (
       typeof parsedUser?.id === "number" &&
       typeof parsedUser?.username === "string" &&
-      typeof parsedUser?.employee_id === "string"
+      typeof parsedUser?.employee_id === "string" &&
+      typeof parsedToken === "string" &&
+      parsedToken.length > 0
     ) {
-      return parsedUser;
+      return {
+        user: parsedUser,
+        token: parsedToken,
+      };
     }
   } catch (error) {
-    window.localStorage.removeItem(USER_SESSION_STORAGE_KEY);
+    window.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
   }
 
-  return null;
+  window.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
+  return EMPTY_AUTH_SESSION;
 }
 
-function persistUserSession(user) {
+function persistAuthSession(session) {
   if (typeof window === "undefined") {
     return;
   }
 
-  if (user === null) {
-    window.localStorage.removeItem(USER_SESSION_STORAGE_KEY);
+  if (session.user === null || !session.token) {
+    window.localStorage.removeItem(AUTH_SESSION_STORAGE_KEY);
     return;
   }
 
-  window.localStorage.setItem(USER_SESSION_STORAGE_KEY, JSON.stringify(user));
+  window.localStorage.setItem(AUTH_SESSION_STORAGE_KEY, JSON.stringify(session));
 }
 
 async function fetchProductsFromApi({
+  authToken,
+  onUnauthorized,
   setProducts,
   setSelectedProduct,
   selectedProductId,
@@ -128,7 +168,9 @@ async function fetchProductsFromApi({
   try {
     setIsLoading(true);
 
-    const response = await axios.get(`${API_BASE_URL}/products`);
+    const response = await axios.get(`${API_BASE_URL}/products`, {
+      headers: buildAuthHeaders(authToken),
+    });
 
     setProducts(response.data);
 
@@ -144,41 +186,53 @@ async function fetchProductsFromApi({
         : "Inventory synced successfully."
     );
   } catch (error) {
+    if (isUnauthorizedError(error)) {
+      onUnauthorized();
+      return;
+    }
+
     setFeedback(getErrorMessage(error, "Could not load products from the backend."));
   } finally {
     setIsLoading(false);
   }
 }
 
-function LoginScreen({
+function AuthScreen({
+  authMode,
   feedback,
-  form,
   isAuthenticating,
-  onChange,
-  onSubmit,
+  loginForm,
+  onLoginChange,
+  onLoginSubmit,
+  onModeChange,
+  onRegisterChange,
+  onRegisterSubmit,
+  registerForm,
 }) {
   const feedbackTone = getFeedbackTone(feedback);
+  const isRegisterMode = authMode === "register";
 
   return (
     <div className="auth-shell">
       <section className="auth-grid">
         <article className="auth-spotlight">
           <span className="eyebrow">Secure Access</span>
-          <h1>Welcome back to InvoTrack.</h1>
+          <h1>{isRegisterMode ? "Create your employee account." : "Welcome back to InvoTrack."}</h1>
           <p>
-            Sign in with the employee account you created from the FastAPI register
-            endpoint to manage products, pricing, and stock updates.
+            {isRegisterMode
+              ? "Register a new employee profile from the frontend, save it through your FastAPI register API, and start managing inventory right away."
+              : "Sign in with the employee account you created from the FastAPI register endpoint to manage products, pricing, and stock updates."}
           </p>
 
           <div className="auth-feature-list">
             <div className="auth-feature-card">
-              <strong>Employee ID login</strong>
-              <span>Your backend now signs in with employee id and password.</span>
+              <strong>Register from the UI</strong>
+              <span>New users can create an account here with username, employee ID, and password.</span>
             </div>
 
             <div className="auth-feature-card">
-              <strong>Live inventory workspace</strong>
-              <span>The dashboard loads directly from your FastAPI product APIs.</span>
+              <strong>Employee ID login</strong>
+              <span>Your backend signs in with employee id and password through the auth API.</span>
             </div>
 
             <div className="auth-feature-card">
@@ -189,49 +243,132 @@ function LoginScreen({
         </article>
 
         <section className="panel auth-card">
+          <div className="auth-toggle" role="tablist" aria-label="Authentication mode">
+            <button
+              className={authMode === "login" ? "auth-toggle-btn auth-toggle-btn-active" : "auth-toggle-btn"}
+              type="button"
+              onClick={() => onModeChange("login")}
+            >
+              Login
+            </button>
+
+            <button
+              className={isRegisterMode ? "auth-toggle-btn auth-toggle-btn-active" : "auth-toggle-btn"}
+              type="button"
+              onClick={() => onModeChange("register")}
+            >
+              Register
+            </button>
+          </div>
+
           <div className="panel-header">
-            <span className="panel-kicker">Login</span>
-            <h2>Sign in to continue</h2>
-            <p>Use the same employee id and password you registered in the backend.</p>
+            <span className="panel-kicker">{isRegisterMode ? "Register" : "Login"}</span>
+            <h2>{isRegisterMode ? "Create a new employee account" : "Sign in to continue"}</h2>
+            <p>
+              {isRegisterMode
+                ? "This form calls your FastAPI register endpoint and creates a new user record."
+                : "Use the same employee id and password you registered in the backend."}
+            </p>
           </div>
 
           <div className={`status-banner status-banner-${feedbackTone}`}>{feedback}</div>
 
-          <form className="product-form" onSubmit={onSubmit}>
-            <label className="field">
-              <span>Employee ID</span>
-              <input
-                name="employee_id"
-                type="text"
-                placeholder="EMP001"
-                autoComplete="username"
-                value={form.employee_id}
-                onChange={onChange}
-                disabled={isAuthenticating}
-              />
-            </label>
+          {isRegisterMode ? (
+            <form className="product-form" onSubmit={onRegisterSubmit}>
+              <label className="field">
+                <span>Username</span>
+                <input
+                  name="username"
+                  type="text"
+                  placeholder="Saad"
+                  autoComplete="username"
+                  value={registerForm.username}
+                  onChange={onRegisterChange}
+                  disabled={isAuthenticating}
+                />
+              </label>
 
-            <label className="field">
-              <span>Password</span>
-              <input
-                name="password"
-                type="password"
-                placeholder="Enter your password"
-                autoComplete="current-password"
-                value={form.password}
-                onChange={onChange}
-                disabled={isAuthenticating}
-              />
-            </label>
+              <label className="field">
+                <span>Employee ID</span>
+                <input
+                  name="employee_id"
+                  type="text"
+                  placeholder="EMP001"
+                  autoComplete="username"
+                  value={registerForm.employee_id}
+                  onChange={onRegisterChange}
+                  disabled={isAuthenticating}
+                />
+              </label>
 
-            <button className="btn btn-primary auth-submit" type="submit" disabled={isAuthenticating}>
-              {isAuthenticating ? "Signing in..." : "Sign in"}
-            </button>
-          </form>
+              <label className="field">
+                <span>Password</span>
+                <input
+                  name="password"
+                  type="password"
+                  placeholder="Create a password"
+                  autoComplete="new-password"
+                  value={registerForm.password}
+                  onChange={onRegisterChange}
+                  disabled={isAuthenticating}
+                />
+              </label>
+
+              <label className="field">
+                <span>Confirm password</span>
+                <input
+                  name="confirm_password"
+                  type="password"
+                  placeholder="Repeat the password"
+                  autoComplete="new-password"
+                  value={registerForm.confirm_password}
+                  onChange={onRegisterChange}
+                  disabled={isAuthenticating}
+                />
+              </label>
+
+              <button className="btn btn-primary auth-submit" type="submit" disabled={isAuthenticating}>
+                {isAuthenticating ? "Creating account..." : "Register and continue"}
+              </button>
+            </form>
+          ) : (
+            <form className="product-form" onSubmit={onLoginSubmit}>
+              <label className="field">
+                <span>Employee ID</span>
+                <input
+                  name="employee_id"
+                  type="text"
+                  placeholder="EMP001"
+                  autoComplete="username"
+                  value={loginForm.employee_id}
+                  onChange={onLoginChange}
+                  disabled={isAuthenticating}
+                />
+              </label>
+
+              <label className="field">
+                <span>Password</span>
+                <input
+                  name="password"
+                  type="password"
+                  placeholder="Enter your password"
+                  autoComplete="current-password"
+                  value={loginForm.password}
+                  onChange={onLoginChange}
+                  disabled={isAuthenticating}
+                />
+              </label>
+
+              <button className="btn btn-primary auth-submit" type="submit" disabled={isAuthenticating}>
+                {isAuthenticating ? "Signing in..." : "Sign in"}
+              </button>
+            </form>
+          )}
 
           <p className="auth-footnote">
-            Example password format: <strong>S@12345</strong>. It only needs to match
-            the password used during registration.
+            {isRegisterMode
+              ? "Register uses username, employee ID, and password. After success, the new account is signed in automatically."
+              : "Example password format: S@12345. It only needs to match the password used during registration."}
           </p>
         </section>
       </section>
@@ -240,6 +377,7 @@ function LoginScreen({
 }
 
 function App() {
+  const [authSession, setAuthSession] = useState(() => readStoredSession());
   const [products, setProducts] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
   const [editingId, setEditingId] = useState(null);
@@ -251,31 +389,19 @@ function App() {
   const [isLookupLoading, setIsLookupLoading] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState(null);
   const [feedback, setFeedback] = useState("Loading inventory from your backend...");
-  const [currentUser, setCurrentUser] = useState(() => readStoredUser());
+  const [authMode, setAuthMode] = useState("login");
   const [loginForm, setLoginForm] = useState(EMPTY_LOGIN_FORM);
+  const [registerForm, setRegisterForm] = useState(EMPTY_REGISTER_FORM);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [authFeedback, setAuthFeedback] = useState(
-    "Sign in with your employee ID to access the inventory dashboard."
+    "Sign in with your employee ID or create an account to access the inventory dashboard."
   );
+  const currentUser = authSession.user;
+  const authToken = authSession.token;
 
   useEffect(() => {
-    persistUserSession(currentUser);
-  }, [currentUser]);
-
-  useEffect(() => {
-    if (currentUser === null) {
-      setIsLoading(false);
-      return;
-    }
-
-    void fetchProductsFromApi({
-      setProducts,
-      setSelectedProduct,
-      selectedProductId: null,
-      setIsLoading,
-      setFeedback,
-    });
-  }, [currentUser]);
+    persistAuthSession(authSession);
+  }, [authSession]);
 
   const totalProducts = products.length;
   const totalUnits = products.reduce(
@@ -324,12 +450,58 @@ function App() {
     setFeedback("Workspace cleared.");
   }
 
+  function handleAuthModeChange(nextMode) {
+    setAuthMode(nextMode);
+    setAuthFeedback(
+      nextMode === "register"
+        ? "Create an account with username, employee ID, and password."
+        : "Sign in with your employee ID to access the inventory dashboard."
+    );
+  }
+
+  const handleAuthFailure = useCallback(() => {
+    setAuthSession(EMPTY_AUTH_SESSION);
+    setProducts([]);
+    setSelectedProduct(null);
+    setSearchTerm("");
+    setLookupId("");
+    setDeleteTargetId(null);
+    setIsSubmitting(false);
+    setIsLookupLoading(false);
+    setForm(EMPTY_FORM);
+    setEditingId(null);
+    setAuthMode("login");
+    setLoginForm(EMPTY_LOGIN_FORM);
+    setRegisterForm(EMPTY_REGISTER_FORM);
+    setFeedback("Loading inventory from your backend...");
+    setAuthFeedback("Your session expired. Sign in again to continue.");
+  }, []);
+
+  useEffect(() => {
+    if (currentUser === null || !authToken) {
+      setIsLoading(false);
+      return;
+    }
+
+    void fetchProductsFromApi({
+      authToken,
+      onUnauthorized: handleAuthFailure,
+      setProducts,
+      setSelectedProduct,
+      selectedProductId: null,
+      setIsLoading,
+      setFeedback,
+    });
+  }, [authToken, currentUser, handleAuthFailure]);
+
   async function refreshProducts() {
-    if (currentUser === null) {
+    if (currentUser === null || !authToken) {
       return;
     }
 
     await fetchProductsFromApi({
+      authToken,
+      onUnauthorized: handleAuthFailure,
       setProducts,
       setSelectedProduct,
       selectedProductId: selectedProduct?.id ?? null,
@@ -342,7 +514,9 @@ function App() {
     try {
       setIsLookupLoading(true);
 
-      const response = await axios.get(`${API_BASE_URL}/products/${productId}`);
+      const response = await axios.get(`${API_BASE_URL}/products/${productId}`, {
+        headers: buildAuthHeaders(authToken),
+      });
 
       setSelectedProduct(response.data);
       setLookupId(String(productId));
@@ -353,6 +527,11 @@ function App() {
       );
       setFeedback(`Product #${productId} loaded successfully.`);
     } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleAuthFailure();
+        return;
+      }
+
       setSelectedProduct(null);
       setFeedback(
         getErrorMessage(error, `Could not load product #${productId} from the backend.`)
@@ -375,6 +554,15 @@ function App() {
     const { name, value } = event.target;
 
     setLoginForm((currentForm) => ({
+      ...currentForm,
+      [name]: value,
+    }));
+  }
+
+  function handleRegisterInputChange(event) {
+    const { name, value } = event.target;
+
+    setRegisterForm((currentForm) => ({
       ...currentForm,
       [name]: value,
     }));
@@ -412,8 +600,12 @@ function App() {
         password,
       });
 
-      setCurrentUser(response.data.user);
+      setAuthSession({
+        user: response.data.user,
+        token: response.data.access_token,
+      });
       setLoginForm(EMPTY_LOGIN_FORM);
+      setRegisterForm(EMPTY_REGISTER_FORM);
       setAuthFeedback(response.data.message || "Login successful.");
       setFeedback("Loading inventory from your backend...");
     } catch (error) {
@@ -423,8 +615,60 @@ function App() {
     }
   }
 
+  async function handleRegisterSubmit(event) {
+    event.preventDefault();
+
+    const username = registerForm.username.trim();
+    const employeeId = registerForm.employee_id.trim();
+    const password = registerForm.password;
+    const confirmPassword = registerForm.confirm_password;
+
+    if (!username || !employeeId || !password || !confirmPassword) {
+      setAuthFeedback("Complete username, employee ID, password, and confirmation to register.");
+      return;
+    }
+
+    if (password.length < 6) {
+      setAuthFeedback("Password must be at least 6 characters long.");
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setAuthFeedback("Password and confirm password must match.");
+      return;
+    }
+
+    try {
+      setIsAuthenticating(true);
+
+      const response = await axios.post(`${API_BASE_URL}/auth/register`, {
+        username,
+        employee_id: employeeId,
+        password,
+      });
+
+      const loginResponse = await axios.post(`${API_BASE_URL}/auth/login`, {
+        employee_id: employeeId,
+        password,
+      });
+
+      setAuthSession({
+        user: loginResponse.data.user,
+        token: loginResponse.data.access_token,
+      });
+      setLoginForm(EMPTY_LOGIN_FORM);
+      setRegisterForm(EMPTY_REGISTER_FORM);
+      setAuthFeedback(`Account created successfully. Welcome, ${response.data.username}.`);
+      setFeedback("Loading inventory from your backend...");
+    } catch (error) {
+      setAuthFeedback(getErrorMessage(error, "Could not create the account right now."));
+    } finally {
+      setIsAuthenticating(false);
+    }
+  }
+
   function handleLogout() {
-    setCurrentUser(null);
+    setAuthSession(EMPTY_AUTH_SESSION);
     setProducts([]);
     setSelectedProduct(null);
     setSearchTerm("");
@@ -432,9 +676,12 @@ function App() {
     setDeleteTargetId(null);
     setIsSubmitting(false);
     setIsLookupLoading(false);
+    setAuthMode("login");
+    setLoginForm(EMPTY_LOGIN_FORM);
+    setRegisterForm(EMPTY_REGISTER_FORM);
     resetForm();
     setFeedback("Loading inventory from your backend...");
-    setAuthFeedback("You have been signed out. Sign in again to access inventory.");
+    setAuthFeedback("You have been signed out. Sign in or register to access inventory.");
   }
 
   async function handleSubmit(event) {
@@ -466,7 +713,9 @@ function App() {
       setIsSubmitting(true);
 
       if (isEditing) {
-        const response = await axios.put(`${API_BASE_URL}/products/${editingId}`, payload);
+        const response = await axios.put(`${API_BASE_URL}/products/${editingId}`, payload, {
+          headers: buildAuthHeaders(authToken),
+        });
 
         setProducts((currentProducts) =>
           currentProducts.map((product) =>
@@ -477,7 +726,9 @@ function App() {
         setLookupId(String(response.data.id));
         setFeedback(`Product #${response.data.id} updated successfully.`);
       } else {
-        const response = await axios.post(`${API_BASE_URL}/products`, payload);
+        const response = await axios.post(`${API_BASE_URL}/products`, payload, {
+          headers: buildAuthHeaders(authToken),
+        });
 
         setProducts((currentProducts) => [...currentProducts, response.data]);
         setSelectedProduct(response.data);
@@ -487,6 +738,11 @@ function App() {
 
       resetForm();
     } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleAuthFailure();
+        return;
+      }
+
       setFeedback(getErrorMessage(error, "Could not save the product."));
     } finally {
       setIsSubmitting(false);
@@ -507,7 +763,9 @@ function App() {
     try {
       setDeleteTargetId(productId);
 
-      await axios.delete(`${API_BASE_URL}/products/${productId}`);
+      await axios.delete(`${API_BASE_URL}/products/${productId}`, {
+        headers: buildAuthHeaders(authToken),
+      });
 
       setProducts((currentProducts) =>
         currentProducts.filter((product) => product.id !== productId)
@@ -527,6 +785,11 @@ function App() {
 
       setFeedback(`Product #${productId} deleted successfully.`);
     } catch (error) {
+      if (isUnauthorizedError(error)) {
+        handleAuthFailure();
+        return;
+      }
+
       setFeedback(getErrorMessage(error, `Could not delete product #${productId}.`));
     } finally {
       setDeleteTargetId(null);
@@ -548,12 +811,17 @@ function App() {
 
   if (currentUser === null) {
     return (
-      <LoginScreen
+      <AuthScreen
+        authMode={authMode}
         feedback={authFeedback}
-        form={loginForm}
         isAuthenticating={isAuthenticating}
-        onChange={handleLoginInputChange}
-        onSubmit={handleLoginSubmit}
+        loginForm={loginForm}
+        onLoginChange={handleLoginInputChange}
+        onLoginSubmit={handleLoginSubmit}
+        onModeChange={handleAuthModeChange}
+        onRegisterChange={handleRegisterInputChange}
+        onRegisterSubmit={handleRegisterSubmit}
+        registerForm={registerForm}
       />
     );
   }
