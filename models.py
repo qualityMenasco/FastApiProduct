@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ProductBase(BaseModel):
@@ -26,6 +26,14 @@ class UserBase(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     employee_id: str = Field(min_length=1, max_length=50)
 
+    @field_validator("username", "employee_id")
+    @classmethod
+    def validate_non_blank_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
 
 class UserCreate(UserBase):
     password: str = Field(min_length=6, max_length=128)
@@ -34,6 +42,14 @@ class UserCreate(UserBase):
 class UserLogin(BaseModel):
     employee_id: str = Field(min_length=1, max_length=50)
     password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("employee_id")
+    @classmethod
+    def validate_employee_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        return value
 
 
 class User(UserBase):

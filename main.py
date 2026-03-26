@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -70,6 +71,12 @@ def dump_schema(schema: ProductCreate | ProductUpdate) -> dict:
     return schema.dict()
 
 
+def duplicate_user_detail(existing_user: UserDB, user: UserCreate) -> str:
+    if existing_user.username == user.username:
+        return "Username already exists"
+    return "Employee ID already exists"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -109,11 +116,10 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
         .first()
     )
     if existing_user is not None:
-        if existing_user.username == user.username:
-            detail = "Username already exists"
-        else:
-            detail = "Employee ID already exists"
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=duplicate_user_detail(existing_user, user),
+        )
 
     db_user = UserDB(
         username=user.username,
@@ -121,7 +127,14 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
         password_hash=hash_password(user.password),
     )
     db.add(db_user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username or employee ID already exists",
+        ) from None
     db.refresh(db_user)
     return serialize_user(db_user)
 
